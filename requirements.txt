@@ -1,0 +1,12 @@
+# Runtime deps for OGCM_Python.
+# numpy 1.26.x (with tensorflow 2.16 co-installed) OR numpy 2.x both work.
+# gsw >= 3.6.16 is fine; we ship our own pure-Python `mlp` in ogcm_dl/_mlp.py
+# because GSW-Python does not wrap `gsw_mlp` at any version.
+# scipy is used by the RTOFS-archive-to-GLBy regrid pipeline (KDTree + IDW).
+numpy>=1.26
+netCDF4>=1.6
+gsw>=3.6.16
+python-dateutil>=2.8
+scipy>=1.11
+# PyYAML is only required if you use RTOFS_Post's config_archive_to_nc_3d.yaml
+# workflow; the built-in pipeline in this repo doesn't need it.
