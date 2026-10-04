@@ -64,6 +64,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from run_hycom_pipeline import _prepare_archv  # noqa: E402
+from ogcm_dl.calc_adcirc import NP_CHUNK_DEFAULT  # noqa: E402
 from ogcm_dl.config import Config  # noqa: E402
 from ogcm_dl.mesh import calc_areas, calc_derivatives, read_f14  # noqa: E402
 from ogcm_dl.output import (  # noqa: E402
@@ -91,6 +92,7 @@ class WorkerJob:
     fort14: Path
     out_type: int
     keep_intermediates: bool
+    np_chunk: int = NP_CHUNK_DEFAULT
 
 
 def _init_worker(log_level: int) -> None:
@@ -145,7 +147,7 @@ def _process_one(job: WorkerJob) -> dict[str, Any]:
     adc = compute_bc2d_from_grid(
         cfg, when=result.when,
         ts_grid=result.ts_grid, uv_grid=result.uv_grid,
-        mesh=mesh,
+        mesh=mesh, np_chunk=job.np_chunk,
     )
     t_adcirc = time.perf_counter() - t2
 
@@ -252,6 +254,10 @@ def _parse_args() -> argparse.Namespace:
                         "min(cpu_count, 3). Memory-bound; ~7 GB per worker.")
     p.add_argument("--keep-intermediates", action="store_true",
                    help="Keep each worker's extracted .a after processing.")
+    p.add_argument("--np-chunk", type=int, default=NP_CHUNK_DEFAULT,
+                   help=f"ADCIRC nodes per chunk in the calc step. Lower "
+                        f"on tight-RAM machines with large fort.14 meshes "
+                        f"(default: {NP_CHUNK_DEFAULT}).")
     p.add_argument("-v", "--verbose", action="count", default=0,
                    help="-v INFO, -vv DEBUG.")
     return p.parse_args()
@@ -327,6 +333,7 @@ def main() -> int:
             fort14=args.fort14.expanduser().resolve(),
             out_type=args.outtype,
             keep_intermediates=args.keep_intermediates,
+            np_chunk=args.np_chunk,
         ))
 
     t_total0 = time.perf_counter()

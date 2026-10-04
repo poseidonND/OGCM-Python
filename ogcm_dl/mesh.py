@@ -80,7 +80,7 @@ def read_f14(path: str | Path) -> AdcircMesh:
             sfea[i] = float(tok[2])
             dp[i] = float(tok[3])
 
-        nm = np.empty((ne, 3), dtype=np.int64)
+        nm = np.empty((ne, 3), dtype=np.int32)
         for i in range(ne):
             tok = fh.readline().split()
             # Convert from 1-based to 0-based
@@ -177,68 +177,103 @@ def calc_areas(mesh: AdcircMesh) -> np.ndarray:
     `mesh.total_area`, and an internal `_fdxe`, `_fdye` used by
     `calc_derivatives`. Returns the element areas array for convenience.
     """
-    ne = mesh.ne
     nm = mesh.nm
     slam = mesh.slam
     sfea = mesh.sfea
+    n1 = nm[:, 0]
+    n2 = nm[:, 1]
+    n3 = nm[:, 2]
 
-    areas = np.zeros(ne, dtype=np.float64)
+    lon0, lon1, lon2 = slam[n1], slam[n2], slam[n3]
+    lat0, lat1, lat2 = sfea[n1], sfea[n2], sfea[n3]
+    lonc0 = np.mod(lon0, 360.0)
+    lonc1 = np.mod(lon1, 360.0)
+    lonc2 = np.mod(lon2, 360.0)
+
+    xr0 = 0.5 * (lonc1 - lonc0)
+    xr1 = 0.5 * (lat1 - lat0)
+    xs0 = 0.5 * (lonc2 - lonc0)
+    xs1 = 0.5 * (lat2 - lat0)
+    jac1 = xr0 * xs1 - xr1 * xs0
+    dlx = np.stack([lonc1 - lonc0, lonc2 - lonc1, lonc0 - lonc2], axis=0)
+    dly = np.stack([lat1 - lat0, lat2 - lat1, lat0 - lat2], axis=0)
+    dled1 = np.sqrt((dlx * dlx + dly * dly).sum(axis=0))
+
+    # CW triangles that do not wrap the dateline: reverse n1/n3 (Fortran).
+    flip = (jac1 < 0.0) & (dled1 < 360.0)
+    if np.any(flip):
+        tmp1, tmp3 = n1[flip].copy(), n3[flip].copy()
+        n1[flip] = tmp3
+        n3[flip] = tmp1
+        nm[:, 0] = n1
+        nm[:, 2] = n3
+        lon0, lon2 = slam[n1], slam[n3]
+        lat0, lat2 = sfea[n1], sfea[n3]
+
+    # Mercator projection. Dateline-wrapping triangles are rare; recompute
+    # those with the original wrap-aware helper so the common path stays
+    # fully vectorized.
+    lonm0 = np.mod(lon0, 360.0)
+    lonm1 = np.mod(slam[n2], 360.0)
+    lonm2 = np.mod(lon2, 360.0)
+    lat1 = sfea[n2]
+    xr0 = 0.5 * (lonm1 - lonm0)
+    xr1 = 0.5 * (lat1 - lat0)
+    xs0 = 0.5 * (lonm2 - lonm0)
+    xs1 = 0.5 * (lat2 - lat0)
+    jac2 = xr0 * xs1 - xr1 * xs0
+    dlx = np.stack([lonm1 - lonm0, lonm2 - lonm1, lonm0 - lonm2], axis=0)
+    dly = np.stack([lat1 - lat0, lat2 - lat1, lat0 - lat2], axis=0)
+    dled2 = np.sqrt((dlx * dlx + dly * dly).sum(axis=0))
+    wrap = (jac2 < 0.0) | ((jac2 > 0.0) & (dled2 > 360.0))
+
+    lonm_rad0 = lonm0 * DEG2RAD
+    lonm_rad1 = lonm1 * DEG2RAD
+    lonm_rad2 = lonm2 * DEG2RAD
+    lat0_rad = lat0 * DEG2RAD
+    lat1_rad = lat1 * DEG2RAD
+    lat2_rad = lat2 * DEG2RAD
+    cphi0 = np.cos(SFEA0)
+    x0 = R_EARTH * (lonm_rad0 - SLAM0) * cphi0
+    x1 = R_EARTH * (lonm_rad1 - SLAM0) * cphi0
+    x2 = R_EARTH * (lonm_rad2 - SLAM0) * cphi0
+    y0 = R_EARTH * np.log(np.tan(lat0_rad) + 1.0 / np.cos(lat0_rad)) * cphi0
+    y1 = R_EARTH * np.log(np.tan(lat1_rad) + 1.0 / np.cos(lat1_rad)) * cphi0
+    y2 = R_EARTH * np.log(np.tan(lat2_rad) + 1.0 / np.cos(lat2_rad)) * cphi0
+
+    if np.any(wrap):
+        idx = np.flatnonzero(wrap)
+        for ie in idx:
+            lonve = np.array(
+                [slam[nm[ie, 0]], slam[nm[ie, 1]], slam[nm[ie, 2]]],
+                dtype=np.float64,
+            )
+            latve = np.array(
+                [sfea[nm[ie, 0]], sfea[nm[ie, 1]], sfea[nm[ie, 2]]],
+                dtype=np.float64,
+            )
+            xv, yv = _cal_elxv_spcoor(lonve, latve)
+            x0[ie], x1[ie], x2[ie] = xv
+            y0[ie], y1[ie], y2[ie] = yv
+
+    x2mx1 = x1 - x0
+    x3mx2 = x2 - x1
+    x1mx3 = x0 - x2
+    y2my1 = y1 - y0
+    y3my2 = y2 - y1
+    y1my3 = y0 - y2
+
+    fdxe = np.stack([-y3my2, -y1my3, -y2my1], axis=1)
+    fdye = np.stack([x3mx2, x1mx3, x2mx1], axis=1)
+    areas = 0.5 * (x1mx3 * (-y3my2) + x3mx2 * y1my3)
+
     total_area = np.zeros(mesh.np_, dtype=np.float64)
-    fdxe = np.zeros((ne, 3), dtype=np.float64)
-    fdye = np.zeros((ne, 3), dtype=np.float64)
-
-    for ii in range(ne):
-        lonve = np.array(
-            [slam[nm[ii, 0]], slam[nm[ii, 1]], slam[nm[ii, 2]]],
-            dtype=np.float64,
-        )
-        latve = np.array(
-            [sfea[nm[ii, 0]], sfea[nm[ii, 1]], sfea[nm[ii, 2]]],
-            dtype=np.float64,
-        )
-        lonve_check = np.mod(lonve, 360.0)
-        jac1 = _cal_jac(lonve_check, latve)
-        dled1 = _cal_edgelength(lonve_check, latve)
-        if jac1 < 0.0 and dled1 < 360.0:
-            tmp = nm[ii, :].copy()
-            nm[ii, 0] = tmp[2]
-            nm[ii, 1] = tmp[1]
-            nm[ii, 2] = tmp[0]
-
-        lonve = np.array(
-            [slam[nm[ii, 0]], slam[nm[ii, 1]], slam[nm[ii, 2]]],
-            dtype=np.float64,
-        )
-        latve = np.array(
-            [sfea[nm[ii, 0]], sfea[nm[ii, 1]], sfea[nm[ii, 2]]],
-            dtype=np.float64,
-        )
-        xve, yve = _cal_elxv_spcoor(lonve, latve)
-        x1, x2, x3 = xve
-        y1, y2, y3 = yve
-        x2mx1 = x2 - x1
-        x3mx2 = x3 - x2
-        x1mx3 = x1 - x3
-        y2my1 = y2 - y1
-        y3my2 = y3 - y2
-        y1my3 = y1 - y3
-
-        fdxe[ii, 0] = -y3my2
-        fdxe[ii, 1] = -y1my3
-        fdxe[ii, 2] = -y2my1
-        fdye[ii, 0] = x3mx2
-        fdye[ii, 1] = x1mx3
-        fdye[ii, 2] = x2mx1
-
-        areas[ii] = 0.5 * (x1mx3 * (-y3my2) + x3mx2 * y1my3)
-        total_area[nm[ii, 0]] += areas[ii]
-        total_area[nm[ii, 1]] += areas[ii]
-        total_area[nm[ii, 2]] += areas[ii]
+    np.add.at(total_area, n1, areas)
+    np.add.at(total_area, n2, areas)
+    np.add.at(total_area, n3, areas)
 
     mesh.areas = areas
     mesh.total_area = total_area
-    # Stash for calc_derivatives. Underscore-prefixed attributes are
-    # implementation details; calc_derivatives clears them.
     setattr(mesh, "_fdxe", fdxe)
     setattr(mesh, "_fdye", fdye)
     return areas

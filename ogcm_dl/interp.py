@@ -154,36 +154,80 @@ class InterpWeights:
     indz: np.ndarray
 
 
+def _haversine_vec(lon1: np.ndarray, lon2: np.ndarray,
+                   lat1: np.ndarray, lat2: np.ndarray) -> np.ndarray:
+    """Vectorized great-circle distance (same formula as `haversine`)."""
+    lat1c = np.minimum(LAT_UL, lat1)
+    lat2c = np.minimum(LAT_UL, lat2)
+    dlat = DEG2RAD * (lat2c - lat1c)
+    dlon = DEG2RAD * (lon2 - lon1)
+    a = (np.sin(0.5 * dlat) ** 2
+         + np.cos(DEG2RAD * lat1c) * np.cos(DEG2RAD * lat2c)
+         * np.sin(0.5 * dlon) ** 2)
+    a = np.clip(a, 0.0, 1.0)
+    return R_EARTH * 2.0 * np.arcsin(np.sqrt(a))
+
+
 def get_interpolation_weights(slam: np.ndarray, sfea: np.ndarray,
                               dp: np.ndarray,
                               bc3d_lon: np.ndarray, bc3d_lat: np.ndarray,
                               bc3d_z: np.ndarray) -> InterpWeights:
     """Build the bilinear interpolation weights for every ADCIRC node.
 
-    Mirrors `Get_Interpolation_Weights` in the Fortran code.
+    Mirrors `Get_Interpolation_Weights` in the Fortran code, vectorized.
     """
-    np_ = len(slam)
-    nz = len(bc3d_z)
-    indxy = np.zeros((4, np_), dtype=np.int64)
-    weights = np.zeros((4, np_), dtype=np.float64)
-    indz = np.full(np_, -1, dtype=np.int64)
+    xx = np.asarray(slam, dtype=np.float64)
+    if float(bc3d_lon.min()) >= 0.0:
+        xx = np.where(xx < 0.0, xx + 360.0, xx)
+    yy = np.asarray(sfea, dtype=np.float64)
+    bb = np.asarray(dp, dtype=np.float64)
 
-    bc3d_lon_min = float(bc3d_lon.min())
+    xp = int(bc3d_lon.size)
+    yp = int(bc3d_lat.size)
+    i = np.searchsorted(bc3d_lon, xx, side="right") - 1
+    j = np.searchsorted(bc3d_lat, yy, side="right") - 1
 
-    for ip in range(np_):
-        xx = float(slam[ip])
-        if bc3d_lon_min >= 0.0 and xx < 0.0:
-            xx += 360.0
-        yy = float(sfea[ip])
-        bb = float(dp[ip])
+    wraps_lon = (3.0 * float(bc3d_lon[0]) - 2.0 * float(bc3d_lon[1]) + 360.0
+                 < float(bc3d_lon[xp - 1]))
 
-        idx, w = bl_interp(bc3d_lon, bc3d_lat, xx, yy)
-        indxy[:, ip] = idx
-        weights[:, ip] = w
+    i_neg = i < 0
+    i = np.where(i_neg, 0, i)
+    ir = i + 1
+    ir = np.where(i_neg, 0, ir)
+    ir_over = ir >= xp
+    ir = np.where(ir_over, 0 if wraps_lon else xp - 1, ir)
 
-        # Largest iz with z[iz] < bb
-        for iz in range(nz):
-            if bc3d_z[iz] < bb:
-                indz[ip] = iz
+    j_neg = j < 0
+    j = np.where(j_neg, 0, j)
+    jr = j + 1
+    jr = np.where(j_neg, 0, jr)
+    jr = np.where(jr >= yp, yp - 1, jr)
+
+    x1 = bc3d_lon[i]
+    x2 = bc3d_lon[ir]
+    y1 = bc3d_lat[j]
+    y2 = bc3d_lat[jr]
+
+    same_x = ir == i
+    x2x1 = np.where(same_x, 1.0, _haversine_vec(x1, x2, yy, yy))
+    x2x = np.where(same_x, 0.0, _haversine_vec(xx, x2, yy, yy))
+    xx1 = np.where(same_x, 1.0, _haversine_vec(x1, xx, yy, yy))
+    same_y = jr == j
+    y2y1 = np.where(same_y, 1.0, _haversine_vec(xx, xx, y1, y2))
+    y2y = np.where(same_y, 0.0, _haversine_vec(xx, xx, yy, y2))
+    yy1 = np.where(same_y, 1.0, _haversine_vec(xx, xx, y1, yy))
+
+    denom = x2x1 * y2y1
+    degenerate = denom < 1e-12
+    denom_safe = np.where(degenerate, 1.0, denom)
+    w1 = np.where(degenerate, 1.0, x2x * y2y / denom_safe)
+    w2 = np.where(degenerate, 0.0, xx1 * y2y / denom_safe)
+    w3 = np.where(degenerate, 0.0, x2x * yy1 / denom_safe)
+    w4 = np.where(degenerate, 0.0, xx1 * yy1 / denom_safe)
+
+    indxy = np.stack([i, j, ir, jr], axis=0).astype(np.int32, copy=False)
+    weights = np.stack([w1, w2, w3, w4], axis=0)
+    # Largest iz with z[iz] < dp  <=>  searchsorted_left(z, dp) - 1
+    indz = (np.searchsorted(bc3d_z, bb, side="left") - 1).astype(np.int32)
 
     return InterpWeights(indxy=indxy, weights=weights, indz=indz)

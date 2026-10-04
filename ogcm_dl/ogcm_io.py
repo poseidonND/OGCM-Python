@@ -67,7 +67,7 @@ def _read_var(nc: Dataset, name: str) -> np.ndarray:
     var.set_auto_mask(False)
     var.set_auto_scale(False)
 
-    raw = np.asarray(var[:], dtype=np.float64)
+    raw = np.asarray(var[:], dtype=np.float32)
     # The Fortran reads shape (NX, NY, NZ); netCDF on disk stores as
     # (time, depth, lat, lon). Strip the (typically singleton) time dim.
     if raw.ndim == 4:
@@ -89,7 +89,8 @@ def _read_var(nc: Dataset, name: str) -> np.ndarray:
     # Threshold = FV + 1e-3 (Fortran adds a tiny buffer); above this we apply
     # the unscaling, below it (== fill) we mark with our internal FV sentinel.
     fv_thresh = fv_attr + 1.0e-3
-    out = np.where(raw > fv_thresh, raw * sf_attr + os_attr, FV).astype(np.float64)
+    out = np.where(raw > fv_thresh, raw * np.float32(sf_attr) + np.float32(os_attr),
+                   np.float32(FV)).astype(np.float32)
     return out
 
 

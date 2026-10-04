@@ -121,7 +121,7 @@ python scripts/run_hycom_pipeline.py \
     -v
 ```
 
-Timings on a 5.4 GB tar (measured on an M-series Mac):
+Timings on a 5.4 GB tar (M-series Mac, 27 k-node example mesh):
 
 | Stage      |   cold  | warm .a cache |
 |------------|---------|---------------|
@@ -130,9 +130,9 @@ Timings on a 5.4 GB tar (measured on an M-series Mac):
 | ADCIRC     |   15 s  |    27 s       |
 | **total**  |**5:30** | **4:13**      |
 
-Add `--keep-intermediates` on the first run so the extracted `.a` sticks
-around under `work_hycom/` and subsequent runs on the same tar hit the fast
-path.
+On a 13.4 M-node mesh (`ShadowND.14`) the same file is **~21 min** serial
+(see §7). Add `--keep-intermediates` on the first run so the extracted `.a`
+sticks around under `work_hycom/` and subsequent runs hit the fast path.
 
 ### 3c. Many RTOFS archv → single `fort.11.nc` (serial or parallel)
 
@@ -147,9 +147,9 @@ with `--framework`:
                         tight-RAM machine.
 
 --framework parallel    Farm files to a ProcessPool of --workers processes
-                        (default min(cpu_count, 3)). ~4-5x wall-time
-                        speedup for N files on a multi-core, ample-RAM
-                        machine. Each worker holds ~7 GB peak.
+                        (default min(cpu_count, 3)). Each worker holds
+                        ~7 GB on a small mesh, ~8–9 GiB RSS on a 13 M-node
+                        mesh. Worker count is memory-bound, not core-bound.
 
 --framework auto        Serial for 1 file, parallel for >1. (default)
 ```
@@ -220,7 +220,52 @@ sample `fort.14`. To actually run on new data you'll want on-target:
 
 ---
 
-## 7. `work_hycom/` cache
+## 7. Large-mesh performance and memory
+
+Element areas, interpolation weights, and baroclinic pressure-gradient
+assembly are vectorized (numpy). On `ShadowND.14` (13.4 M nodes, 26.1 M
+elements) one RTOFS archive is **21.4 min** serial / **~8 GiB RSS**:
+
+| Stage                    | Before vectorize | After        |
+|--------------------------|------------------|--------------|
+| Extract `.a`             | 80 s             | 80 s         |
+| Regrid hybrid→z          | 226 s            | 237 s        |
+| Read `fort.14`           | 21 s             | 21 s         |
+| Element areas            | 8.6 min          | **14 s**     |
+| Interpolation weights    | 4.2 min          | **4 s**      |
+| T/S on nodes (`gsw`)     | ~13 min          | 13.5 min     |
+| BPG + write              | ~40 min          | **1.7 min**  |
+| **Wall**                 | **71.6 min**     | **21.4 min** |
+
+The remaining ADCIRC cost is TEOS-10 (`gsw.rho` / `Nsquared`) over every
+node. Regrid is unchanged (~4 min; ~8 min in a parallel worker because
+BLAS is pinned to 1 thread so N workers do not oversubscribe).
+
+All three wrappers accept `--np-chunk N` (default 100000). Use
+`--np-chunk 50000` on 10 M+ node meshes if RAM is tight. Chunking is
+bit-exact across all 6 TS-side fields and BCSL.
+
+In-memory OGCM fields are **float32** (~6 GB for a T/S pair instead of
+~12 GB as float64). Connectivity is `int32`.
+
+### Parallel workers vs RAM
+
+`--framework parallel` farms **whole files**, not nodes. Each concurrent
+file holds its own mesh + T/S grid:
+
+| Machine RAM | Safe `--workers` on a 13 M-node mesh |
+|-------------|--------------------------------------|
+| 16 GB       | 1 (serial / 1 worker)                |
+| 64 GB       | **6** (8 is tight: 8 × 9 GiB ≈ 72)   |
+| 128 GB      | 8+                                   |
+
+Eight archives on 64 GB with `--workers 6` is about **45–50 min** wall
+(two waves). `--workers 8` is about **25–30 min** if they all fit.
+Serial 8 files would be ~2.8 h. Omit `--keep-intermediates` so each
+worker deletes its ~12 GB `.a`; 6 in flight need ~70 GB scratch disk.
+Combined output is ~4.7 GB (8 × 584 MB).
+
+## 8. `work_hycom/` cache
 
 The RTOFS pipeline wrappers extract each 5.4 GB `.a.tar` to an
 uncompressed 12 GB `.a` under `work_hycom/` (or a per-job subdir in the
@@ -229,7 +274,7 @@ subsequent runs. Delete `work_hycom/` to reclaim disk.
 
 ---
 
-## 8. Verifying the port
+## 9. Verifying the port
 
 Every run above was cross-checked against a Fortran-generated
 `fort.11.nc`. All six ADCIRC output variables agree to floating-point

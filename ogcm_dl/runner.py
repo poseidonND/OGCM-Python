@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from .calc_adcirc import (
+    NP_CHUNK_DEFAULT,
     calc_bc2d_ts_adcirc,
     calc_bc2d_uv_adcirc,
     calc_steric_adjustment,
@@ -79,7 +80,8 @@ def _step_ts_uv(cfg: Config, when: datetime, time_index: int,
                 mesh: AdcircMesh, index: OgcmIndex,
                 weights_state: dict[str, object],
                 preloaded_ts: Bc3dGrid | None = None,
-                preloaded_uv: Bc3dGrid | None = None) -> None:
+                preloaded_uv: Bc3dGrid | None = None,
+                np_chunk: int = NP_CHUNK_DEFAULT) -> None:
     """Run a single time step for OutType 3 (TS) or OutType 4 (TS + UV).
 
     Callers may pass `preloaded_ts` / `preloaded_uv` to bypass the netCDF
@@ -95,8 +97,8 @@ def _step_ts_uv(cfg: Config, when: datetime, time_index: int,
         grid_ts = read_bc3d_netcdf(ts_path, flag=3)
     weights = _get_or_compute_weights(weights_state, mesh, grid_ts)
 
-    log.info("Computing T & S terms on ADCIRC grid")
-    ts_result = calc_bc2d_ts_adcirc(grid_ts, mesh, weights)
+    log.info("Computing T & S terms on ADCIRC grid (np_chunk=%d)", np_chunk)
+    ts_result = calc_bc2d_ts_adcirc(grid_ts, mesh, weights, np_chunk=np_chunk)
 
     uv_result = None
     if cfg.out_type == 4:
@@ -124,8 +126,10 @@ def _step_ts_uv(cfg: Config, when: datetime, time_index: int,
                     weights_state.get("sig"), sig_uv
                 )
             )
-        log.info("Computing U & V terms on ADCIRC grid")
-        uv_result = calc_bc2d_uv_adcirc(grid_uv, mesh, weights)
+        log.info("Computing U & V terms on ADCIRC grid (np_chunk=%d)",
+                 np_chunk)
+        uv_result = calc_bc2d_uv_adcirc(grid_uv, mesh, weights,
+                                        np_chunk=np_chunk)
 
     log.info("Writing time index %d (%s)", time_index, when.isoformat(" "))
     update_netcdf_ts(cfg.bc2d_name, time_index, when, ts_result, uv_result)
@@ -134,7 +138,8 @@ def _step_ts_uv(cfg: Config, when: datetime, time_index: int,
 def _step_bcsl(cfg: Config, when: datetime, time_index: int,
                mesh: AdcircMesh, index: OgcmIndex,
                weights_state: dict[str, object],
-               preloaded_ts: Bc3dGrid | None = None) -> None:
+               preloaded_ts: Bc3dGrid | None = None,
+               np_chunk: int = NP_CHUNK_DEFAULT) -> None:
     """Run a single time step for OutType 5 (BCSL)."""
     if preloaded_ts is not None:
         log.info("Using preloaded TS grid (in-memory) for %s", when.isoformat(" "))
@@ -145,13 +150,15 @@ def _step_bcsl(cfg: Config, when: datetime, time_index: int,
         grid = read_bc3d_netcdf(ts_path, flag=5)
     weights = _get_or_compute_weights(weights_state, mesh, grid)
 
-    log.info("Computing baroclinic sea level on ADCIRC grid")
-    result = calc_steric_adjustment(grid, mesh, weights)
+    log.info("Computing baroclinic sea level on ADCIRC grid (np_chunk=%d)",
+             np_chunk)
+    result = calc_steric_adjustment(grid, mesh, weights, np_chunk=np_chunk)
     log.info("Writing time index %d (%s)", time_index, when.isoformat(" "))
     update_netcdf_bcsl(cfg.bc2d_name, time_index, when, result)
 
 
-def run(cfg: Config, ogcm_data_path: str | Path = "ogcm_data.txt") -> None:
+def run(cfg: Config, ogcm_data_path: str | Path = "ogcm_data.txt",
+        np_chunk: int = NP_CHUNK_DEFAULT) -> None:
     """Top-level runner. Replaces PROGRAM OGCM_DL + subroutine OGCM_Run.
 
     Parameters
@@ -161,6 +168,10 @@ def run(cfg: Config, ogcm_data_path: str | Path = "ogcm_data.txt") -> None:
     ogcm_data_path
         Path to the file listing local OGCM snapshots (matches `OGCMFILE` in
         the Fortran program).
+    np_chunk
+        Number of ADCIRC nodes to process per chunk on the ADCIRC-side
+        calculators. Bounds peak memory for large meshes; see
+        `ogcm_dl.calc_adcirc.NP_CHUNK_DEFAULT`.
     """
     if cfg.out_type not in (3, 4, 5):
         raise ValueError(
@@ -196,9 +207,11 @@ def run(cfg: Config, ogcm_data_path: str | Path = "ogcm_data.txt") -> None:
     while cur <= cfg.te:
         log.info("=== Time step %d: %s ===", time_index, cur.isoformat(" "))
         if cfg.out_type in (3, 4):
-            _step_ts_uv(cfg, cur, time_index, mesh, index, weights_state)
+            _step_ts_uv(cfg, cur, time_index, mesh, index, weights_state,
+                        np_chunk=np_chunk)
         elif cfg.out_type == 5:
-            _step_bcsl(cfg, cur, time_index, mesh, index, weights_state)
+            _step_bcsl(cfg, cur, time_index, mesh, index, weights_state,
+                       np_chunk=np_chunk)
         cur += step
         time_index += 1
 
@@ -208,7 +221,8 @@ def run(cfg: Config, ogcm_data_path: str | Path = "ogcm_data.txt") -> None:
 def compute_bc2d_from_grid(cfg: Config, when: datetime,
                            ts_grid: Bc3dGrid,
                            uv_grid: Bc3dGrid | None = None,
-                           mesh: AdcircMesh | None = None
+                           mesh: AdcircMesh | None = None,
+                           np_chunk: int = NP_CHUNK_DEFAULT,
                            ) -> "dict[str, object]":
     """Run the ADCIRC-side computation for one preloaded grid and return the
     result *without* writing any NetCDF file.
@@ -241,8 +255,10 @@ def compute_bc2d_from_grid(cfg: Config, when: datetime,
 
     out: dict[str, object] = {"when": when, "out_type": cfg.out_type}
     if cfg.out_type in (3, 4):
-        log.info("Computing T & S terms on ADCIRC grid")
-        out["ts"] = calc_bc2d_ts_adcirc(ts_grid, mesh, weights)
+        log.info("Computing T & S terms on ADCIRC grid (np_chunk=%d)",
+                 np_chunk)
+        out["ts"] = calc_bc2d_ts_adcirc(ts_grid, mesh, weights,
+                                        np_chunk=np_chunk)
         if cfg.out_type == 4:
             # Sanity: uv grid must share the TS grid geometry so the same
             # bilinear weights apply.
@@ -257,11 +273,15 @@ def compute_bc2d_from_grid(cfg: Config, when: datetime,
                 raise RuntimeError(
                     "TS and UV grids at the same time have different geometry"
                 )
-            log.info("Computing U & V terms on ADCIRC grid")
-            out["uv"] = calc_bc2d_uv_adcirc(uv_grid, mesh, weights)
+            log.info("Computing U & V terms on ADCIRC grid (np_chunk=%d)",
+                     np_chunk)
+            out["uv"] = calc_bc2d_uv_adcirc(uv_grid, mesh, weights,
+                                            np_chunk=np_chunk)
     else:
-        log.info("Computing baroclinic sea level on ADCIRC grid")
-        out["bcsl"] = calc_steric_adjustment(ts_grid, mesh, weights)
+        log.info("Computing baroclinic sea level on ADCIRC grid (np_chunk=%d)",
+                 np_chunk)
+        out["bcsl"] = calc_steric_adjustment(ts_grid, mesh, weights,
+                                              np_chunk=np_chunk)
     return out
 
 
@@ -270,7 +290,8 @@ def run_single_step(cfg: Config, when: datetime,
                     uv_grid: Bc3dGrid | None = None,
                     mesh: AdcircMesh | None = None,
                     time_index: int = 0,
-                    fresh_output: bool = True) -> None:
+                    fresh_output: bool = True,
+                    np_chunk: int = NP_CHUNK_DEFAULT) -> None:
     """Run a single OGCM_DL step with a preloaded in-memory grid.
 
     Bypasses reading the TS/UV NetCDF files entirely. Use when the caller
@@ -325,8 +346,9 @@ def run_single_step(cfg: Config, when: datetime,
              time_index, when.isoformat(" "))
     if cfg.out_type in (3, 4):
         _step_ts_uv(cfg, when, time_index, mesh, dummy_index, weights_state,
-                    preloaded_ts=ts_grid, preloaded_uv=uv_grid)
+                    preloaded_ts=ts_grid, preloaded_uv=uv_grid,
+                    np_chunk=np_chunk)
     else:
         _step_bcsl(cfg, when, time_index, mesh, dummy_index, weights_state,
-                   preloaded_ts=ts_grid)
+                   preloaded_ts=ts_grid, np_chunk=np_chunk)
     log.info("Wrote step %d to %s", time_index, out_path)

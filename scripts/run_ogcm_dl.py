@@ -19,6 +19,7 @@ from pathlib import Path
 # Allow running this script directly from the repo root without `pip install`.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from ogcm_dl.calc_adcirc import NP_CHUNK_DEFAULT  # noqa: E402
 from ogcm_dl.config import read_control_file  # noqa: E402
 from ogcm_dl.runner import run  # noqa: E402
 
@@ -35,6 +36,12 @@ def main() -> int:
     parser.add_argument(
         "--ogcm-data", type=Path, default=Path("ogcm_data.txt"),
         help="Path to ogcm_data.txt (default: ./ogcm_data.txt).",
+    )
+    parser.add_argument(
+        "--np-chunk", type=int, default=None,
+        help="Number of ADCIRC nodes processed per chunk in the "
+             "TS/UV/BCSL calculators. Lower this on tight-RAM machines "
+             "with large fort.14 meshes (default: 100000).",
     )
     parser.add_argument(
         "-v", "--verbose", action="count", default=0,
@@ -61,7 +68,8 @@ def main() -> int:
             )
         cfg = read_control_file(sys.stdin)
 
-    run(cfg, ogcm_data_path=args.ogcm_data)
+    np_chunk = args.np_chunk if args.np_chunk is not None else NP_CHUNK_DEFAULT
+    run(cfg, ogcm_data_path=args.ogcm_data, np_chunk=np_chunk)
     return 0
 
 

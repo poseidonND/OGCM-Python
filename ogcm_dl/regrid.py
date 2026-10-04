@@ -617,18 +617,19 @@ def convert_archv_to_glby(
     if return_in_memory:
         # Import lazily to avoid a hard cycle at module import time.
         from .ogcm_io import Bc3dGrid
-        # ogcm_io returns fields where fills are the FV sentinel; do the same
-        # here so downstream code sees identical semantics.
+        # Keep the regridded fields in float32 (FV sentinel fits) so a
+        # 40 x 4251 x 4500 pair is ~6 GB instead of ~12 GB as float64.
         from .constants import FV
-        sp = np.where(np.isfinite(salin), salin, FV).astype(np.float64)
-        tm = np.where(np.isfinite(temp), temp, FV).astype(np.float64)
+        salin = np.where(np.isfinite(salin), salin, np.float32(FV))
+        temp = np.where(np.isfinite(temp), temp, np.float32(FV))
         ts_grid = Bc3dGrid(
             bc3d_lon=target_lon.astype(np.float64),
             bc3d_lat=target_lat.astype(np.float64),
             bc3d_z=target_z.astype(np.float64),
-            bc3d_sp=sp,
-            bc3d_t=tm,
+            bc3d_sp=salin,
+            bc3d_t=temp,
         )
+        temp = salin = None
     del temp, salin
 
     uv_path: Path | None = None
@@ -646,16 +647,21 @@ def convert_archv_to_glby(
         if return_in_memory:
             from .ogcm_io import Bc3dGrid
             from .constants import FV
-            u64 = np.where(np.isfinite(u), u, FV).astype(np.float64)
-            v64 = np.where(np.isfinite(v), v, FV).astype(np.float64)
+            u = np.where(np.isfinite(u), u, np.float32(FV))
+            v = np.where(np.isfinite(v), v, np.float32(FV))
             uv_grid = Bc3dGrid(
                 bc3d_lon=target_lon.astype(np.float64),
                 bc3d_lat=target_lat.astype(np.float64),
                 bc3d_z=target_z.astype(np.float64),
-                bc3d_sp=u64,
-                bc3d_t=v64,
+                bc3d_sp=u,
+                bc3d_t=v,
             )
+            u = v = None
         del u, v
+
+    # Drop the source-grid working arrays before returning so they don't
+    # sit next to the ADCIRC mesh on large-mesh runs.
+    del thknss, depths_mid_shared, hw, plon, plat
 
     return ArchvNCPaths(when=when, ts3z=ts_path, uv3z=uv_path,
                          ts_grid=ts_grid, uv_grid=uv_grid)

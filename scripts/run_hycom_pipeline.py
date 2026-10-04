@@ -39,6 +39,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from ogcm_dl.regrid import convert_archv_to_glby  # noqa: E402
+from ogcm_dl.calc_adcirc import NP_CHUNK_DEFAULT  # noqa: E402
 from ogcm_dl.config import read_control_file  # noqa: E402
 from ogcm_dl.runner import run_single_step  # noqa: E402
 
@@ -205,6 +206,10 @@ def _parse_args() -> argparse.Namespace:
                         "straight to run_ogcm_dl, saving ~90 s per file.")
     p.add_argument("--keep-intermediates", action="store_true",
                    help="Do not delete the extracted .a after regridding.")
+    p.add_argument("--np-chunk", type=int, default=NP_CHUNK_DEFAULT,
+                   help=f"ADCIRC nodes per chunk in the calc step. "
+                        f"Lower on tight-RAM machines with large fort.14 "
+                        f"meshes (default: {NP_CHUNK_DEFAULT}).")
     p.add_argument("-v", "--verbose", action="count", default=0,
                    help="-v INFO, -vv DEBUG.")
     return p.parse_args()
@@ -298,6 +303,7 @@ def main() -> int:
             cfg, when=result.when,
             ts_grid=result.ts_grid,
             uv_grid=result.uv_grid,
+            np_chunk=args.np_chunk,
         )
         timings["3_ogcm_dl"] = time.perf_counter() - t0
         timings["total"] = time.perf_counter() - t_total0
